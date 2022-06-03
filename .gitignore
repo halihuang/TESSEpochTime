@@ -1,3 +1,5 @@
 venv
 .idea/
-TESS_data/
+TESS_data/light_curves_fausnaugh
+TESS_data/AT_count_transients_s1-47 (4).txt
+TESS_data/SN_count_transients_s1-47 (1).txt
