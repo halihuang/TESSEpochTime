@@ -16,7 +16,7 @@ def preprocess(filename, display=False):
     processes data of single lightcurve
     :param filename: lightcurve filename string
     :param display: whether to show plot
-    :return: processed light curve in PandaDataframe, TJD of max light
+    :return: processed light curve in PandaDataframe
     """
     # lightcurve data
     curve = pd.read_csv("./TESS_data/light_curves_fausnaugh/" + filename, delim_whitespace=True)
@@ -73,26 +73,34 @@ def preprocess(filename, display=False):
     # repalce NANs as 0s
     curve = curve.fillna(0)
 
-    id_max = curve["cts"].idxmax()
-    max_data = curve.loc[id_max, :]
-    t_max = max_data['relative_time']
-
     if display:
         plot_title = f"{curve_name}\n Class: {curve_meta['class'].iloc[0]}, Sector: {curve_meta['sector'].iloc[0]} \nCoords:{curve_meta['ra'].iloc[0], curve_meta['dec'].iloc[0]}, \nDiscovery TJD: {curve_meta['TJD_discovery'].iloc[0]}, Survey: {curve_meta['survey'].iloc[0]}"
         ax = curve.plot.scatter(x="relative_time", y='cts', c="00000", alpha=0.5, yerr='e_cts', ylabel="Flux", xlabel="Days relative to discovery", title=plot_title)
-        ax.axvline(t_max, color="red", linestyle="--")
 
-    return curve, t_max
+    return curve, curve_meta
 
 
-def process_all_images():
+def process_all_curves():
     """
     :return: iterator over all processed light_curves (PandaDataFrames) and their respective max light (TJD str)
     """
     light_curves = os.listdir("./TESS_data/light_curves_fausnaugh")
     i = 0
     while i < len(light_curves):
-        light_curve, max_light = preprocess(light_curves[i])
+        light_curve, meta = preprocess(light_curves[i])
         if light_curve is not None:
-            yield light_curve, max_light
+            yield light_curve, meta
         i += 1
+
+
+def save_processed_curves():
+    for curve, meta in process_all_curves():
+        df = pd.DataFrame({"cts": curve["cts"], "e_cts": curve["e_cts"]}, index=curve.index)
+        df.index = df.index.astype("timedelta64[D]")
+        filename = f"lc_{meta['IAU'].iloc[0]}_processed.csv"
+        directory = "./TESS_data/processed_curves/"
+        df.to_csv(directory + filename)
+
+
+# save all curves as CSVs
+save_processed_curves()
