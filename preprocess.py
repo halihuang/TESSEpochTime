@@ -17,7 +17,7 @@ transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47 (4).txt", names=
 def bin_curves(df, interval, time_col="relative_time"):
     """
     :param df: panda dataframe with cts and e_cts cols
-    :param interval: str, Day: D, Minute: T, Second: S
+    :param interval: str, scalar + unit, eg. 0.5D, Units: Day: D, Minute: T, Second: S
     :param time_col: label of col of time
     :return:
     """
