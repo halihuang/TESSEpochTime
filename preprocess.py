@@ -6,10 +6,12 @@ import extinction
 from astroquery.ipac.irsa.irsa_dust import IrsaDust
 import astropy.coordinates as coord
 import astropy.units as u
+import shutil
 
 #config params
 time_scale = "first" # {"first", "trigger", "BTJD", "TJD"}, determines whether to index relative to first observation or trigger, BTJD, or TJD time"
 to_bin = True
+norm = True
 bin_interval = "0.5D" # Day: D, Minute: T, Second: S
 transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47 (4).txt", names=["sector", "ra", "dec", "mag", "TJD_discovery", "type" ,"class", "IAU", "survey", "cam", "ccd", "col", "row"], delim_whitespace=True)
 
@@ -33,6 +35,24 @@ def bin_curves(df, interval, time_col="relative_time"):
     return binned
 
 
+def normalize(df):
+    e_cts = df['e_cts']
+    cts = df['cts']
+    max_cts = cts.max()
+    min_cts = cts.min()
+    normalized_cts = (cts - min_cts) / (max_cts - min_cts)
+    normalized_ects = e_cts / (max_cts - min_cts)
+    return normalized_cts, normalized_ects
+
+
+def sigma_clip(df, col,  times=5, const=3):
+    for _ in range(0, times):
+        mean = df[col].mean()
+        threshold = const * df[col].std()
+        df = df[np.abs(df[col] - mean) <= threshold]
+    return df
+
+
 def preprocess(filename, display=False):
     """
     processes data of single lightcurve
@@ -51,15 +71,15 @@ def preprocess(filename, display=False):
         return None, None, None
     curve_meta = curve_meta.iloc[0]
 
-    # sigma clipping
-    for _ in range(0, 5):
-        uncert_mean = curve.e_cts.mean()
-        threshold = 3*curve.e_cts.std()
-        curve = curve[np.abs(curve['e_cts'] - uncert_mean) <= threshold]
+    # sigma clipping by e_cts
+    curve = sigma_clip(curve, "e_cts")
 
     # sub bg flux
     if not curve['bkg_model'].isnull().all():
         curve['cts'] = curve['cts'] - curve['bkg_model']
+
+    # sigma clipping by cts
+    curve = sigma_clip(curve, "cts")
 
     # correct milky way extinction
     # Set relevant parameters
@@ -86,19 +106,20 @@ def preprocess(filename, display=False):
     curve_meta["mwebv"] = mwebv
     curve_meta["gal_lat"] = b
 
+    # set time step scale
     if time_scale == "trigger":
         # convert time to relative to discovery
         curve['relative_time'] = curve['TJD'] - curve_meta["TJD_discovery"]
-
     if time_scale == "first":
         # convert time to relative to 1st observation
         curve['relative_time'] = curve['BTJD'] - curve['BTJD'].iloc[0]
-
     if time_scale == "BTJD":
         curve['relative_time'] = curve['BTJD']
-
     if time_scale == "TJD":
         curve['relative_time'] = curve['TJD']
+
+    if norm:
+        curve['cts'], curve['e_cts'] = normalize(curve)
 
     # bin
     if to_bin:
@@ -112,6 +133,7 @@ def preprocess(filename, display=False):
     if display:
         plot_title = f"{curve_name}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} \nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, Survey: {curve_meta['survey']}"
         ax = curve.plot.scatter(x="relative_time", y='cts', c="00000", alpha=0.5, yerr='e_cts', ylabel="Flux", xlabel="Days relative to discovery", title=plot_title)
+        print(ax)
 
     return curve, curve_meta, original
 
@@ -129,9 +151,12 @@ def process_all_curves():
         i += 1
 
 
-def save_processed_curves(directory):
+def save_processed_curves(directory, zip_name):
     outliers = []
     mwebv_outliers = []
+
+    for f in os.listdir(directory):
+        os.remove(os.path.join(directory, f))
 
     for curve, meta, original in process_all_curves():
         df = pd.DataFrame({"cts": curve["cts"], "e_cts": curve["e_cts"]}, index=curve.index)
@@ -149,11 +174,11 @@ def save_processed_curves(directory):
 
     mwebv_df = pd.DataFrame(mwebv_outliers)
     mwebv_df.to_csv("./TESS_data/mwebv_outliers.csv", index=False)
+    shutil.make_archive(zip_name, 'zip', directory)
 
 
-
-# preprocess("lc_2018fbm_cleaned")
-
-# save all curves as CSVs
-save_processed_curves("./TESS_data/processed_curves/")
+if __name__ == "__main__":
+    # preprocess("lc_2018fbm_cleaned")
+    # save all curves as CSVs
+    save_processed_curves("./TESS_data/processed_curves/", "processed_curves")
 

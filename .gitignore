@@ -5,3 +5,4 @@ TESS_data/processed_curves/
 TESS_data/mwebv_outliers.csv
 TESS_data/potential_outliers.txt
 __pycache__/
+processed_curves.zip
