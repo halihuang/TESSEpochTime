@@ -8,16 +8,7 @@ import astropy.coordinates as coord
 import astropy.units as u
 import shutil
 
-transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47 (4).txt", names=["sector", "ra", "dec", "mag", "TJD_discovery", "type" ,"class", "IAU", "survey", "cam", "ccd", "col", "row"], delim_whitespace=True)
-
-# config params
-time_scale = "trigger" # {"first", "trigger", "BTJD", "TJD"}, determines whether to index relative to first observation or trigger, BTJD, or TJD time"
-to_bin = True
-norm = True
-ztf_tess = True # if false only does tess
-bin_interval = "0.5D" # Day: D, Minute: T, Second: S
-meta_targets = ["TJD_discovery_rel"]
-passbands = {'r': 2, 'g': 1}
+meta_targets = ["trigger"]
 
 
 def bin_curves(df, interval, time_col="relative_time", uncert="e_cts"):
@@ -58,8 +49,8 @@ def sigma_clip(df, col,  times=5, const=3):
     return df
 
 
-def convert_to_bin_timescale(value):
-    return pd.Timedelta(value, unit="D").round(bin_interval) / pd.to_timedelta(bin_interval)
+def convert_to_bin_timescale(value, interval):
+    return pd.Timedelta(value, unit="D").round(interval) / pd.to_timedelta(interval)
 
 
 def convert_cts_to_mag(cts, sec, is_uncert=False):
@@ -69,77 +60,121 @@ def convert_cts_to_mag(cts, sec, is_uncert=False):
     return mag
 
 
-def preproccess_ztf_tess(filename):
+def get_curve_meta(curve_name, transients_dir="./TESS_data/AT_count_transients_s1-47 (4).txt"):
+    transients = pd.read_csv(transients_dir,
+                             names=["sector", "ra", "dec", "mag", "TJD_discovery", "type", "class", "IAU", "survey",
+                                    "cam", "ccd", "col", "row"], delim_whitespace=True)
+    curve_meta = transients[transients['IAU'] == curve_name]
+    if curve_meta.empty:
+        return None
+    else:
+        return curve_meta.iloc[0]
+
+def preprocess_ztf(filename, parameters):
     # lightcurve data
     curve = pd.read_csv("./TESS_data/ztf_data/" + filename)
     split = filename.split("_")
     tess_curve_name = split[0]
     # convert from MJD to JD to TJD
     curve['TJD'] = curve['mjd'] + 2400000.5 - 2457000.0
-    print(curve['TJD'].max() - curve['TJD'].min())
     # information about transient
-    curve_meta = transients[transients['IAU'] == tess_curve_name].iloc[0]
+    curve_meta = get_curve_meta(tess_curve_name)
+    # return nothing if no info found
+    if curve_meta is None:
+        return None, None
+    curve_meta['ztf'] = split[1]
     # split into passbands and create ZTF df
     ztf_data = {}
+    passbands = {'r': 2, 'g': 1}
     for pb, fid in passbands.items():
         pb_df = curve[curve['fid'] == fid]
+        mag_str = f'{pb}_mag'
+        uncert_str = f'{pb}_uncert'
         if not pb_df.empty:
-            mag_str = f'{pb}_mag'
-            uncert_str = f'{pb}_uncert'
             to_process = pd.DataFrame({"TJD": pb_df['TJD'], mag_str: pb_df['magpsf'], uncert_str: pb_df["sigmapsf"]})
-            processed_pb = preprocess(to_process, curve_meta, light=mag_str, uncert=uncert_str)
-            print(processed_pb)
+            processed_pb = preprocess(to_process, curve_meta, light=mag_str, uncert=uncert_str,
+                                      to_bin=parameters['to_bin'], bin_interval=parameters['bin_interval'],
+                                      time_scale=parameters['time_scale'], norm=parameters['norm'])
             ztf_data[mag_str] = processed_pb[mag_str]
             ztf_data[uncert_str] = processed_pb[uncert_str]
-    ztf_df = pd.DataFrame(ztf_data).fillna(0.0)
-    if ztf_tess:
-        # find tess file and create TESS df
-        tess_filename = f'lc_{tess_curve_name}_cleaned'
-        tess_df, _ = preprocess_tess(tess_filename, curve_meta)
-        # concat both df
-        final_df = pd.concat([tess_df, ztf_df]).fillna(0.0)
-    else:
-        final_df = ztf_df
+        else:
+            ztf_data[mag_str] = pd.Series(dtype='float64')
+            ztf_data[uncert_str] = pd.Series(dtype='float64')
 
-    return final_df, curve_meta
+    ztf_df = pd.DataFrame(ztf_data)
+    return ztf_df, curve_meta
 
 
-def preprocess_tess(filename, curve_meta=None, convert_mag=True):
+def preprocess_tess(filename, parameters, curve_meta=None):
     original = pd.read_csv("./TESS_data/light_curves_fausnaugh/" + filename, delim_whitespace=True)
     if curve_meta is None:
         tess_curve_name = filename.split("_")[1]
-        curve_meta = transients[transients['IAU'] == tess_curve_name].iloc[0]
-    sector = curve_meta['sector']
-    if convert_mag:
-        original['cts'] = convert_cts_to_mag(original['cts'], sector, is_uncert=False)
-        original['e_cts'] = convert_cts_to_mag(original['e_cts'], sector, is_uncert=True)
-    processed = preprocess(original, curve_meta, sub_bg_model=True)
-    if convert_mag:
+        curve_meta = get_curve_meta(tess_curve_name)
+        if curve_meta is None:
+            return None, None
+    processed = preprocess(original, curve_meta, convert_to_mag=parameters['convert_to_mag'], to_bin=parameters['to_bin'],
+                           bin_interval=parameters['bin_interval'], time_scale=parameters['time_scale'],
+                           norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'])
+
+    if parameters['convert_to_mag']:
         tess_df = pd.DataFrame({"tess_mag": processed['cts'], "tess_uncert": processed['e_cts']})
     else:
         tess_df = processed
     return tess_df, curve_meta
 
 
-def display_curve(light_curve, curve_meta, light, uncert, index="index"):
+def preprocess_ztf_tess(ztf_filename, parameters):
+    params = parameters.copy()
+    ztf_df, df_meta = preprocess_ztf(ztf_filename, params)
+    if df_meta is None:
+        return None, None
+
+    tess_filename = f'lc_{df_meta["IAU"]}_cleaned'
+    params['convert_to_mag'] = True
+    params['sub_bg_model'] = True
+    tess_df, _ = preprocess_tess(tess_filename, params)
+    return ztf_df.join(tess_df, how="outer"), df_meta
+
+
+def display_curve(light_curve, curve_meta, light, uncert, index="index", title_info=""):
     curve = light_curve.copy()
     curve['index'] = light_curve.index
-    plot_title = f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} \nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, Survey: {curve_meta['survey']}"
-    ax = curve.plot.scatter(x=index, y=light, c="00000", alpha=0.5, yerr=uncert, ylabel="Flux", xlabel=f"units ({bin_interval}) relative to discovery", title=plot_title)
+    plot_title = f"{title_info}\n" \
+                 f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} " \
+                 f"\nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, " \
+                 f"Survey: {curve_meta['survey']}"
+    ax = curve.plot.scatter(x=index, y=light, c="00000", alpha=0.5, yerr=uncert, ylabel="Flux",
+                            xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title)
     return ax
 
-def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False):
+
+def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False,
+               convert_to_mag=False, to_bin=True, norm=True, bin_interval="0.5D", time_scale="trigger"):
     """
-    processes data of single lightcurve
+    processes data of single lightcurv
     :param curve: panda dataframe containint light curve data
     :param curve_meta: meta information obtained from AT_transients
     :param light: str key for light column (cts or mag) of DataFrame
     :param uncert: str key for uncert column of Dataframe
     :param sub_bg_model: if background model flux should be subtracted from real
+    :param bin_interval: Day: D, Minute: T, Second: S
+    :param norm: normalizes curve
+    :param to_bin: bins data according to bin interval
+    :param convert_to_mag: converts cts to magnitude
+    :param time_scale: one of ["first", "trigger", "BTJD", "TJD"], determines whether to index relative to first
+    observation or trigger, BTJD, or TJD time"
     :return: processed light curve in PandaDataframe
     """
+
+    if convert_to_mag:
+        sector = curve_meta['sector']
+        curve['cts'] = convert_cts_to_mag(curve['cts'], sector, is_uncert=False)
+        curve['e_cts'] = convert_cts_to_mag(curve['e_cts'], sector, is_uncert=True)
+        curve['bkg_model'] = convert_cts_to_mag(curve['bkg_model'], sector, is_uncert=False)
+
     if curve_meta.empty:
         return None, None
+    curve_meta['interval'] = bin_interval
 
     # sigma clipping by e_cts
     curve = sigma_clip(curve, uncert)
@@ -177,11 +212,11 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     if time_scale == "trigger":
         # convert time to relative to discovery
         curve['relative_time'] = curve['TJD'] - curve_meta["TJD_discovery"]
-        curve_meta["TJD_discovery_rel"] = 0.0
+        curve_meta["trigger"] = 0.0
     if time_scale == "first":
         # convert time to relative to 1st observation
         curve['relative_time'] = curve['TJD'] - curve['TJD'].iloc[0]
-        curve_meta["TJD_discovery_rel"] = convert_to_bin_timescale(curve_meta['TJD_discovery'] - curve['TJD'].iloc[0])
+        curve_meta["trigger"] = convert_to_bin_timescale(curve_meta['TJD_discovery'] - curve['TJD'].iloc[0], bin_interval)
     if time_scale == "BTJD":
         curve['relative_time'] = curve['BTJD']
     if time_scale == "TJD":
@@ -196,54 +231,65 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     else:
         curve.index = curve['relative_time']
 
-    # replace NANs as 0s
-    curve = curve.fillna(0)
+
     return curve
 
 
-def process_all_curves():
+def process_all_curves(parameters):
     """
     :return: iterator over all processed light_curves (PandaDataFrames) and their respective max light (TJD str)
     """
-    if ztf_tess:
-        light_curves = os.listdir("./TESS_data/ztf_data")
-        process = preproccess_ztf_tess
-    else:
-        light_curves = os.listdir("./TESS_data/light_curves_fausnaugh")
-        process = preprocess_tess
+    light_curves = os.listdir("./TESS_data/ztf_data/") if parameters['ztf_tess'] else os.listdir("./TESS_data/light_curves_fausnaugh/")
 
     i = 0
     while i < len(light_curves):
-        light_curve, meta = process(light_curves[i])
+        filename = light_curves[i]
+        if parameters['ztf_tess']:
+            light_curve, curve_meta = preprocess_ztf_tess(filename, parameters)
+        else:
+            light_curve, curve_meta = preprocess_tess(filename, parameters)
+
         if light_curve is not None:
-            yield light_curve, meta
+            yield light_curve, curve_meta
         i += 1
 
 
-def save_processed_curves(directory, zip_name):
+def save_processed_curves(zip_name, params, fillval=0.0):
     mwebv_outliers = []
-
+    directory = "./TESS_data/processed_curves/"
     for f in os.listdir(directory):
         os.remove(os.path.join(directory, f))
 
-    for curve, meta in process_all_curves():
-        if ztf_tess:
+    for curve, meta in process_all_curves(params):
+        # select cols
+        if params['ztf_tess']:
             targets = ['tess_mag', 'tess_uncert', "r_mag", "r_uncert", 'g_mag', "g_uncert"]
         else:
-            targets = ['tess_mag', 'tess_uncert']
-
+            targets = ['cts', 'e_cts']
         df = curve[targets]
-        curve_id = meta['IAU']
-        filename = f"lc_{curve_id}_processed.csv"
+        # limit data points to those in range
+        if 'range' in params:
+            curve_range = params['range']
+            df = df.loc[curve_range[0]:curve_range[1], :]
+        df = df.fillna(fillval)
+        tess_id = meta['IAU']
+        print(tess_id)
+        # filter out curves with mwebv above 0.5
         if meta['mwebv'] > 0.5:
-            mwebv_outliers.append({"mwebv": meta['mwebv'], "class": meta['class'], 'gal_lat': meta['gal_lat'], 'IAU': curve_id})
+            mwebv_outliers.append({"mwebv": meta['mwebv'], "class": meta['class'], 'gal_lat': meta['gal_lat'], 'IAU': tess_id})
         else:
             # add additional meta information
             for info in meta_targets:
-                valid_timesteps = (df['cts'] != 0.0) & (df['e_cts'] != 0.0)
+                valid_timesteps = (df != fillval).any(axis=1)
                 df[info] = pd.Series(meta[info], index=df[valid_timesteps].index)
-                df.loc[~valid_timesteps, info] = 0.0
-
+                df.loc[~valid_timesteps, info] = fillval
+            filename = f"lc_{tess_id}_{meta['ztf']}_processed.csv" if params['ztf_tess'] else f"lc_{tess_id}_processed.csv"
+            # fill in missing timesteps
+            if params['fill_values'] and 'range' in params:
+                for t in range(curve_range[0], curve_range[1] + 1):
+                    if t not in df.index:
+                        df.loc[t] = np.zeros(shape=len(df.columns))
+                        df = df.sort_index()
             df.to_csv(directory + filename)
 
     mwebv_df = pd.DataFrame(mwebv_outliers)
@@ -252,11 +298,18 @@ def save_processed_curves(directory, zip_name):
 
 
 if __name__ == "__main__":
-    pass
-    # preprocess("lc_2018fbm_cleaned")
-    # save all curves as CSVs
-    # save_processed_curves("./TESS_data/processed_curves/", "processed_curves")
-    df, meta = preproccess_ztf_tess("2018lml_ZTF18acyuxjh_detections.csv")
-    df_slice = df.loc[:60, :]
-    display_curve()
+    config = {
+        "norm": True,
+        "to_bin": True,
+        "bin_interval": "0.5D",
+        "time_scale": "trigger",
+        "ztf_tess": True,
+        "fill_values": True,
+        "range": (-60, 60) # 30 divided by bin interval
+    }
+    # data, meta = preprocess_ztf_tess("2018gku_ZTF18abwoxal_detections.csv", config)
+    # data_slice = data.loc[-60:60, :]
+    # print(data_slice)
 
+    # save all curves as CSVs
+    save_processed_curves("processed_curves", config,  0.0)
