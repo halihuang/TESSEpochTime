@@ -8,4 +8,4 @@ TESS_data/ztf_data
 TESS_data/ztf_nondetections
 __pycache__/
 processed_curves_mwebv.zip
-processed_curves.zip
+processed_curves_ztf_tess.zip

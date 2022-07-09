@@ -8,9 +8,6 @@ import astropy.coordinates as coord
 import astropy.units as u
 import shutil
 
-meta_targets = ["trigger"]
-
-
 def bin_curves(df, interval, time_col="relative_time", uncert="e_cts"):
     """
     :param uncert: str for column name of uncertainty
@@ -62,13 +59,40 @@ def convert_cts_to_mag(cts, sec, is_uncert=False):
 
 def get_curve_meta(curve_name, transients_dir="./TESS_data/AT_count_transients_s1-47 (4).txt"):
     transients = pd.read_csv(transients_dir,
-                             names=["sector", "ra", "dec", "mag", "TJD_discovery", "type", "class", "IAU", "survey",
+                             names=["sector", "ra", "dec", "discovery_mag", "TJD_discovery", "type", "class", "IAU", "survey",
                                     "cam", "ccd", "col", "row"], delim_whitespace=True)
     curve_meta = transients[transients['IAU'] == curve_name]
     if curve_meta.empty:
         return None
     else:
         return curve_meta.iloc[0]
+
+
+def display_curve(light_curve, curve_meta, light, uncert,  index="index", color="00000", label="curve", plot=None):
+    curve = light_curve.copy()
+    curve['index'] = light_curve.index
+    plot_title = f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} " \
+                 f"\nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, " \
+                 f"Survey: {curve_meta['survey']}"
+    if plot is None:
+        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.3, yerr=uncert, ylabel="Flux",
+                                xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title,
+                                label=label)
+    else:
+        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.3, yerr=uncert, ylabel="Flux",
+                                xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title,
+                                label=label, ax=plot)
+    return ax
+
+
+def display_all_passbands(df, meta, flip=True):
+    ax = display_curve(df, meta, "tess_mag", "tess_uncert", label="TESS")
+    display_curve(df, meta, "r_mag", "r_uncert", color="orange", label="ZTF Red Passband", plot=ax)
+    display_curve(df, meta, "g_mag", "g_uncert", color="green", label="ZTF Green Passband", plot=ax)
+    if flip:
+        ax.invert_yaxis()
+    return ax
+
 
 def preprocess_ztf(filename, parameters):
     # lightcurve data
@@ -94,7 +118,7 @@ def preprocess_ztf(filename, parameters):
             to_process = pd.DataFrame({"TJD": pb_df['TJD'], mag_str: pb_df['magpsf'], uncert_str: pb_df["sigmapsf"]})
             processed_pb = preprocess(to_process, curve_meta, light=mag_str, uncert=uncert_str,
                                       to_bin=parameters['to_bin'], bin_interval=parameters['bin_interval'],
-                                      time_scale=parameters['time_scale'], norm=parameters['norm'])
+                                      time_scale=parameters['time_scale'], norm=parameters['norm'], is_mag=True)
             ztf_data[mag_str] = processed_pb[mag_str]
             ztf_data[uncert_str] = processed_pb[uncert_str]
         else:
@@ -102,6 +126,7 @@ def preprocess_ztf(filename, parameters):
             ztf_data[uncert_str] = pd.Series(dtype='float64')
 
     ztf_df = pd.DataFrame(ztf_data)
+    ztf_df.index = ztf_df.index.rename("relative_time")
     return ztf_df, curve_meta
 
 
@@ -114,7 +139,7 @@ def preprocess_tess(filename, parameters, curve_meta=None):
             return None, None
     processed = preprocess(original, curve_meta, convert_to_mag=parameters['convert_to_mag'], to_bin=parameters['to_bin'],
                            bin_interval=parameters['bin_interval'], time_scale=parameters['time_scale'],
-                           norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'])
+                           norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'], is_mag=parameters['convert_to_mag'])
 
     if parameters['convert_to_mag']:
         tess_df = pd.DataFrame({"tess_mag": processed['cts'], "tess_uncert": processed['e_cts']})
@@ -131,25 +156,12 @@ def preprocess_ztf_tess(ztf_filename, parameters):
 
     tess_filename = f'lc_{df_meta["IAU"]}_cleaned'
     params['convert_to_mag'] = True
-    params['sub_bg_model'] = True
     tess_df, _ = preprocess_tess(tess_filename, params)
     return ztf_df.join(tess_df, how="outer"), df_meta
 
 
-def display_curve(light_curve, curve_meta, light, uncert, index="index", title_info=""):
-    curve = light_curve.copy()
-    curve['index'] = light_curve.index
-    plot_title = f"{title_info}\n" \
-                 f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} " \
-                 f"\nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, " \
-                 f"Survey: {curve_meta['survey']}"
-    ax = curve.plot.scatter(x=index, y=light, c="00000", alpha=0.5, yerr=uncert, ylabel="Flux",
-                            xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title)
-    return ax
-
-
 def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False,
-               convert_to_mag=False, to_bin=True, norm=True, bin_interval="0.5D", time_scale="trigger"):
+               convert_to_mag=False, to_bin=True, norm=True, bin_interval="0.5D", time_scale="trigger", is_mag=False):
     """
     processes data of single lightcurv
     :param curve: panda dataframe containint light curve data
@@ -168,8 +180,8 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
 
     if convert_to_mag:
         sector = curve_meta['sector']
-        curve['cts'] = convert_cts_to_mag(curve['cts'], sector, is_uncert=False)
-        curve['e_cts'] = convert_cts_to_mag(curve['e_cts'], sector, is_uncert=True)
+        curve[light] = convert_cts_to_mag(curve[light], sector, is_uncert=False)
+        curve[uncert] = convert_cts_to_mag(curve[uncert], sector, is_uncert=True)
         curve['bkg_model'] = convert_cts_to_mag(curve['bkg_model'], sector, is_uncert=False)
 
     if curve_meta.empty:
@@ -183,6 +195,7 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     if sub_bg_model:
         if not curve['bkg_model'].isnull().all():
             curve[light] = curve[light] - curve['bkg_model']
+
 
     # sigma clipping by cts
     ra = curve_meta["ra"]
@@ -200,8 +213,12 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     # Remove extinction from light curves
     # (Using negative a_v so that extinction.apply works in reverse and removes the extinction)
     extinction_per_passband = extinction.fitzpatrick99(wave=bandpass_wavelengths, a_v=-3.1 * mwebv, r_v=3.1, unit='aa')
-    flux_out = extinction.apply(extinction_per_passband[0], flux_in, inplace=False)
-    fluxerr_out = extinction.apply(extinction_per_passband[0], fluxerr_in, inplace=False)
+    if is_mag or convert_to_mag:
+        flux_out = flux_in + extinction_per_passband[0]
+        fluxerr_out = fluxerr_in + extinction_per_passband[0]
+    else:
+        flux_out = extinction.apply(extinction_per_passband[0], flux_in, inplace=False)
+        fluxerr_out = extinction.apply(extinction_per_passband[0], fluxerr_in, inplace=False)
 
     curve[light] = flux_out
     curve[uncert] = fluxerr_out
@@ -231,7 +248,6 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     else:
         curve.index = curve['relative_time']
 
-
     return curve
 
 
@@ -254,7 +270,7 @@ def process_all_curves(parameters):
         i += 1
 
 
-def save_processed_curves(zip_name, params, fillval=0.0):
+def save_processed_curves(zip_name, params, meta_targets, fillval=0.0):
     mwebv_outliers = []
     directory = "./TESS_data/processed_curves/"
     for f in os.listdir(directory):
@@ -305,11 +321,16 @@ if __name__ == "__main__":
         "time_scale": "trigger",
         "ztf_tess": True,
         "fill_values": True,
+        'convert_to_mag': True,
+        'sub_bg_model': False,
         "range": (-60, 60) # 30 divided by bin interval
     }
-    # data, meta = preprocess_ztf_tess("2018gku_ZTF18abwoxal_detections.csv", config)
+    # data, meta = preprocess_tess("lc_2021yyh_cleaned", config)
+    # print(meta['sector'])
     # data_slice = data.loc[-60:60, :]
     # print(data_slice)
 
+    targets = ["mwebv", "discovery_mag"] # meta info to add
+    fillval = -1.0
     # save all curves as CSVs
-    save_processed_curves("processed_curves", config,  0.0)
+    save_processed_curves("processed_curves", config, targets, fillval)
