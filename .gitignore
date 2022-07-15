@@ -1,13 +1,10 @@
 venv
 .idea/
-TESS_data/light_curves_fausnaugh/
-TESS_data/processed_curves/
-TESS_data/mwebv_outliers.csv
-TESS_data/potential_outliers.txt
-TESS_data/ztf_data
-TESS_data/ztf_nondetections
-TESS_data/processed_zips/*
+!TESS_data/README.md
+!TESS_data/AT_count_transients_s1-47 (4).txt
+!TESS_data/SN_count_transients_s1-47 (1).txt
 !TESS_data/processed_zips/.gitkeep
+TESS_data/*
 __pycache__/
 processed_curves_mwebv.zip
 processed_curves_ztf_tess.zip

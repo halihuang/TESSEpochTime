@@ -79,31 +79,58 @@ def get_curve_meta(curve_name, transients_dir="./TESS_data/AT_count_transients_s
         return curve_meta.iloc[0]
 
 
-def display_curve(light_curve, curve_meta, light, uncert,  index="index", color="00000", label="curve", plot=None):
+def find_max_light(curve, light_col, is_mag=False):
+    if curve[light_col].isnull().all():
+        return None
+    light_series = curve[light_col] * -1 if is_mag else curve[light_col]
+    id_max = light_series.idxmax()
+    max_data = curve.loc[id_max, :].copy()
+    max_data['relative_time'] = id_max
+    return max_data
+
+
+def format_title(curve_meta, title_info=""):
+    title = f"{title_info}\n"\
+        f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} " \
+        f"\nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, " \
+        f"Survey: {curve_meta['survey']}"
+    if 'mwebv' in curve_meta:
+        title += f"\nmwebv: {curve_meta['mwebv']}"
+    return title
+
+
+def display_curve(light_curve, curve_meta, light, uncert,  index="index", color="00000", label="curve", plot_title="",
+                  ax=None, max_line=True, max_color="red"):
     curve = light_curve.copy()
     curve['index'] = light_curve.index
-    plot_title = f"{curve_meta['IAU']}\n Class: {curve_meta['class']}, Sector: {curve_meta['sector']} " \
-                 f"\nCoords:{curve_meta['ra'], curve_meta['dec']}, \nDiscovery TJD: {curve_meta['TJD_discovery']}, " \
-                 f"Survey: {curve_meta['survey']}"
-    if plot is None:
-        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.3, yerr=uncert, ylabel="Flux",
-                                xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title,
+    xlabel = f"units ({curve_meta['interval']}) relative to discovery" if 'interval' in curve_meta else ""
+
+    if ax is None:
+        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.5, yerr=uncert, ylabel="mag",
+                                xlabel=xlabel, title=plot_title,
                                 label=label)
     else:
-        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.3, yerr=uncert, ylabel="Flux",
-                                xlabel=f"units ({curve_meta['interval']}) relative to discovery", title=plot_title,
-                                label=label, ax=plot)
-
+        ax = curve.plot.scatter(x=index, y=light, c=color, alpha=0.5, yerr=uncert, ylabel="mag",
+                                xlabel=xlabel, title=plot_title,
+                                label=label, ax=ax)
+    if max_line:
+        t_max = find_max_light(curve, light, is_mag=True)
+        if t_max is not None:
+            ax.axvline(t_max['relative_time'], color=max_color, linestyle="--")
     return ax
 
 
-def display_all_passbands(df, meta, xlim, flip=True):
-    ax = display_curve(df, meta, "tess_mag", "tess_uncert", label="TESS")
-    display_curve(df, meta, "r_mag", "r_uncert", color="orange", label="ZTF Red Passband", plot=ax)
-    display_curve(df, meta, "g_mag", "g_uncert", color="green", label="ZTF Green Passband", plot=ax)
+def display_all_passbands(df, meta, xlim, title_info="", ax=None, flip=True):
+    if ax is None:
+        ax = display_curve(df, meta, "tess_mag", "tess_uncert",color="gray", label="TESS", max_color="black")
+    else:
+        ax = display_curve(df, meta, "tess_mag", "tess_uncert",color="gray", label="TESS", ax=ax, max_color="black")
+    display_curve(df, meta, "r_mag", "r_uncert", color="orange", label="ZTF Red Passband", ax=ax, max_color="red")
+    display_curve(df, meta, "g_mag", "g_uncert", color="green", label="ZTF Green Passband", ax=ax, max_color="green")
     if flip:
         ax.invert_yaxis()
     ax.set_xlim(xlim)
+    ax.set_title(title_info)
     return ax
 
 
@@ -131,10 +158,11 @@ def preprocess_ztf(filename, parameters):
             to_process = pd.DataFrame({"TJD": pb_df['TJD'], mag_str: pb_df['magpsf'], uncert_str: pb_df["sigmapsf"]})
             processed_pb = preprocess(to_process, curve_meta, light=mag_str, uncert=uncert_str,
                                       to_bin=parameters['to_bin'], bin_interval=parameters['bin_interval'],
-                                      time_scale=parameters['time_scale'], norm=parameters['norm'], is_mag=True, convert_to_mag=False)
+                                      time_scale=parameters['time_scale'], norm=parameters['norm'],
+                                      remove_extinction=parameters['remove_extinction'], is_mag=True, convert_to_mag=False)
             if not parameters['to_bin']:
                 ztf_data[mag_str] = remove_duplicate_indices(processed_pb[mag_str])
-                ztf_data[uncert_str] =remove_duplicate_indices(processed_pb[uncert_str])
+                ztf_data[uncert_str] = remove_duplicate_indices(processed_pb[uncert_str])
             else:
                 ztf_data[mag_str] = processed_pb[mag_str]
                 ztf_data[uncert_str] = processed_pb[uncert_str]
@@ -156,7 +184,8 @@ def preprocess_tess(filename, parameters, curve_meta=None):
             return None, None
     processed = preprocess(original, curve_meta, convert_to_mag=parameters['convert_to_mag'], to_bin=parameters['to_bin'],
                            bin_interval=parameters['bin_interval'], time_scale=parameters['time_scale'],
-                           norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'], is_mag=not parameters['convert_to_mag'])
+                           norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'],
+                           remove_extinction=parameters['remove_extinction'], is_mag=not parameters['convert_to_mag'])
     if parameters['convert_to_mag']:
         tess_df = pd.DataFrame({"tess_mag": processed['cts'], "tess_uncert": processed['e_cts']})
     else:
@@ -179,21 +208,25 @@ def preprocess_ztf_tess(ztf_filename, parameters):
     return output, df_meta
 
 
-def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False,
+def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False, remove_extinction=True,
                convert_to_mag=False, to_bin=True, norm=True, bin_interval="0.5D", time_scale="trigger", is_mag=False):
     """
     processes data of single lightcurv
+
     :param curve: panda dataframe containint light curve data
     :param curve_meta: meta information obtained from AT_transients
     :param light: str key for light column (cts or mag) of DataFrame
     :param uncert: str key for uncert column of Dataframe
     :param sub_bg_model: if background model flux should be subtracted from real
+    :param remove_extinction:
     :param bin_interval: Day: D, Minute: T, Second: S
     :param norm: normalizes curve
     :param to_bin: bins data according to bin interval
     :param convert_to_mag: converts cts to magnitude
     :param time_scale: one of ["first", "trigger", "BTJD", "TJD"], determines whether to index relative to first
     observation or trigger, BTJD, or TJD time"
+    :param is_mag:
+
     :return: processed light curve in PandaDataframe
     """
 
@@ -232,28 +265,29 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     # sigma clipping by cts
     curve = sigma_clip(curve, light)
 
-    ra = curve_meta["ra"]
-    dec = curve_meta["dec"]
-    flux_in = curve[light]
-    bandpass_wavelengths = np.array([7865,])
+    if remove_extinction:
+        ra = curve_meta["ra"]
+        dec = curve_meta["dec"]
+        flux_in = curve[light]
+        bandpass_wavelengths = np.array([7865,])
 
-    # Get Milky Way E(B-V) Extinction
-    coo = coord.SkyCoord(ra * u.deg, dec * u.deg, frame='icrs')
-    b = coo.galactic.b.value
-    dust = IrsaDust.get_query_table(coo, section='ebv')
-    mwebv = dust['ext SandF mean'][0]
+        # Get Milky Way E(B-V) Extinction
+        coo = coord.SkyCoord(ra * u.deg, dec * u.deg, frame='icrs')
+        b = coo.galactic.b.value
+        dust = IrsaDust.get_query_table(coo, section='ebv')
+        mwebv = dust['ext SandF mean'][0]
 
-    # Remove extinction from light curves
-    # (Using negative a_v so that extinction.apply works in reverse and removes the extinction)
-    extinction_per_passband = extinction.fitzpatrick99(wave=bandpass_wavelengths, a_v=-3.1 * mwebv, r_v=3.1, unit='aa')
-    if is_mag:
-        flux_out = flux_in + extinction_per_passband[0]
-    else:
-        flux_out = extinction.apply(extinction_per_passband[0], flux_in, inplace=False)
+        # Remove extinction from light curves
+        # (Using negative a_v so that extinction.apply works in reverse and removes the extinction)
+        extinction_per_passband = extinction.fitzpatrick99(wave=bandpass_wavelengths, a_v=-3.1 * mwebv, r_v=3.1, unit='aa')
+        if is_mag:
+            flux_out = flux_in + extinction_per_passband[0]
+        else:
+            flux_out = extinction.apply(extinction_per_passband[0], flux_in, inplace=False)
 
-    curve[light] = flux_out
-    curve_meta["mwebv"] = mwebv
-    curve_meta["gal_lat"] = b
+        curve[light] = flux_out
+        curve_meta["mwebv"] = mwebv
+        curve_meta["gal_lat"] = b
 
     if norm:
         curve[light], curve[uncert] = normalize(curve, uncert=uncert, light=light)
@@ -344,10 +378,10 @@ if __name__ == "__main__":
         "ztf_tess": True,
         'convert_to_mag': True,
         'sub_bg_model': False,
+        'remove_extinction': True
     }
-    data, meta = preprocess_ztf_tess("2020ir_ZTF20aabpmdj_detections.csv", config)
-    data, meta = preprocess_tess("lc_2020ir_cleaned", config)
-
+    # data, meta = preprocess_ztf_tess("2020ir_ZTF20aabpmdj_detections.csv", config)
+    # data, meta = preprocess_tess("lc_2020ir_cleaned", config)
 
     # save all curves as CSVs for training
     import warnings
