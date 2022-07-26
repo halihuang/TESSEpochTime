@@ -1,10 +1,6 @@
 venv
 .idea/
 !TESS_data/README.md
-!TESS_data/AT_count_transients_s1-47 (4).txt
-!TESS_data/SN_count_transients_s1-47 (1).txt
-!TESS_data/processed_zips/.gitkeep
-TESS_data/*
+!TESS_data/tns_info2.csv
 __pycache__/
-processed_curves_mwebv.zip
-processed_curves_ztf_tess.zip
+TESS_data/*
