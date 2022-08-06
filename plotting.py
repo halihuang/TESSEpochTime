@@ -25,13 +25,13 @@ def display_curve(light_curve, curve_meta, light, uncert,  index="index", color=
                   xlabel="Days since trigger", alpha=0.5, ax=None, max_line=True, max_color="red", is_mag=True):
 
     if light_curve[light].empty or light_curve[light].isnull().all():
-        return
+        return ax
 
     if not plot_title:
         plot_title = format_title(curve_meta)
     curve = light_curve.copy()
     curve['index'] = light_curve.index
-    y_label = "mag" if is_mag else "cts"
+    y_label = "mag" if is_mag else "flux"
     if ax is None:
         ax = curve.plot.scatter(x=index, y=light, c=color, alpha=alpha, yerr=uncert, ylabel=y_label,
                                 xlabel=xlabel, title=plot_title,
@@ -43,18 +43,20 @@ def display_curve(light_curve, curve_meta, light, uncert,  index="index", color=
     if max_line:
         t_max = find_max_light(curve, light, is_mag=is_mag)
         if t_max is not None:
-            ax.axvline(t_max['relative_time'], color=max_color, linestyle="--", label=f"{label} Max")
+            ax.axvline(t_max['relative_time'], color=max_color, linestyle="--", label=f"{label} Max: {t_max['relative_time']}")
+    plt.legend(fontsize=8)
     return ax
 
 
-def display_all_passbands(df, meta, xlim, title_info="", ax=None, flip=True):
+def display_all_passbands(df, meta, xlim, title_info="", ax=None, is_mag=False):
+    light_unit = "mag" if is_mag else "flux"
     if ax is None:
-        ax = display_curve(df, meta, "tess_mag", "tess_uncert",color="gray", label="TESS", max_color="black")
+        ax = display_curve(df, meta, f"tess_{light_unit}", "tess_uncert",color="gray", label="TESS", max_color="black", is_mag=is_mag)
     else:
-        display_curve(df, meta, "tess_mag", "tess_uncert",color="gray", label="TESS", ax=ax, max_color="black")
-    display_curve(df, meta, "r_mag", "r_uncert", color="orange", label="ZTF Red Passband", ax=ax, max_color="red")
-    display_curve(df, meta, "g_mag", "g_uncert", color="green", label="ZTF Green Passband", ax=ax, max_line=False)
-    if flip:
+        display_curve(df, meta, f"tess_{light_unit}", "tess_uncert",color="gray", label="TESS", ax=ax, max_color="black", is_mag=is_mag)
+    display_curve(df, meta, f"r_{light_unit}", "r_uncert", color="orange", label="ZTF Red Passband", ax=ax, max_color="red", is_mag=is_mag)
+    display_curve(df, meta, f"g_{light_unit}", "g_uncert", color="green", label="ZTF Green Passband", ax=ax, max_line=False, is_mag=is_mag)
+    if is_mag:
         ax.invert_yaxis()
     ax.set_xlim(xlim)
     ax.set_title(title_info)
@@ -67,7 +69,7 @@ def ztf_plot(filename, params, xlim=[-30,70], save=False, save_dir="./TESS_data/
     df, meta = preprocess_ztf_tess(filename, params)
     df = df.loc[xlim[0]:xlim[1], :]
     if df is not None and not df.empty:
-        display_all_passbands(df, meta, flip=True, xlim=xlim, ax=ax)
+        display_all_passbands(df, meta, is_mag=params["convert_to_mag"], xlim=xlim, ax=ax)
         df.to_csv("./TESS_data/ztf_tess_plots/curves/no_norm/" + filename)
 
         fig.suptitle(format_title(meta), y=1.35)
@@ -75,26 +77,30 @@ def ztf_plot(filename, params, xlim=[-30,70], save=False, save_dir="./TESS_data/
             fig.savefig(save_dir + save_name, bbox_inches="tight")
     if save:
         plt.close(fig)
-    return ax
+    return df
 
 
-def tess_plot(tess_curve_name, params, save=False, save_dir="", xlim=[-30,30]):
+def tess_plot(tess_curve_name, parameters, unbinned=True, save=False, save_dir="", xlim=[-30, 30], ax=None):
     tess_file_name = f'lc_{tess_curve_name}_cleaned'
-    params['to_bin'] = False
-    fig, ax = plt.subplots()
+    params = parameters.copy()
+    params['to_bin'] = True
+    if ax is None:
+        fig, ax = plt.subplots()
     df, meta = preprocess_tess(tess_file_name, params)
+    light_col = "tess_mag" if params["convert_to_mag"] else "tess_flux"
     if df is not None:
-        display_curve(df, meta, "cts", "e_cts", ax=ax, is_mag=False, alpha=0.2)
-        params['to_bin'] = True
+        display_curve(df, meta, light_col, "tess_uncert", ax=ax, is_mag=False, alpha=0.2)
 
-        df1, meta = preprocess_tess(tess_file_name, params)
-        display_curve(df1, meta, "cts", "e_cts", ax=ax, is_mag=False, alpha=1.0, color="blue", max_color="blue", label="binned")
+        if unbinned:
+            params['to_bin'] = False
+            df1, meta = preprocess_tess(tess_file_name, params)
+            display_curve(df1, meta, light_col, "tess_uncert", ax=ax, is_mag=False, alpha=0.5, color="blue", max_color="blue", label="binned")
 
         ax.set_title(format_title(meta))
         ax.set_xlim(xlim)
         if save:
             fig.savefig(save_dir + tess_curve_name, bbox_inches="tight")
             plt.close(fig)
-    return ax
+    return ax, df
 
 

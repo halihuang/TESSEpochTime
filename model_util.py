@@ -18,7 +18,7 @@ def find_label_max_light(curve):
         ztf_t_max = curve[curve["r_mag"] != params.maskval]["r_mag"].idxmin()
         ztf_max = curve.loc[ztf_t_max, :]
 
-        if ztf_t_max > last_tess_datapoint and ztf_max["r_mag"] > tess_max["tess_mag"]:
+        if ztf_t_max > last_tess_datapoint and ztf_max["r_mag"] < tess_max["tess_mag"]:
             ztf_max["relative_time"] = ztf_t_max
             return ztf_max
 
@@ -90,7 +90,7 @@ def load_model(model_name):
     model_path = f"./TESS_data/models/{model_name}"
     params.load(f"{model_path}_params.json")
     model = build_model(params.model_type, mc_dropout=params.enable_mc_dropout)
-    model.load_weights(f"{model_path}.h5")
+    model.load_weights(f"{model_path}_weights.h5")
     return model
 
 
@@ -103,8 +103,9 @@ def plot_pred_vs_true(files, model):
     ax.set_xlabel("Real")
     ax.set_ylabel("Predicted")
     ax.set_title("Real vs Predicted Model Results")
-    ax.set_xlim(params.curve_range)
-    ax.set_ylim(params.curve_range)
+    lim = (0, params.curve_range[1])
+    ax.set_xlim(lim)
+    ax.set_ylim(lim)
     line = np.arange(params.curve_range[0], params.curve_range[1])
     ax.plot(line, line, color="black", alpha=0.5)
 
@@ -117,13 +118,18 @@ def plot_pred_ztf_max(files, model, save=False, save_dir=""):
         df = pd.read_csv(f"./TESS_data/processed_curves/{file}", index_col="relative_time")
         tess_name = file.split("_")[1]
         meta = get_curve_meta(tess_name)
-        fig, ax = plt.subplots()
-        display_all_passbands(df, meta, xlim=[-30, 70], ax=ax, title_info=format_title(meta))
+        fig, ax = plt.subplots(figsize=(9,3))
+        display_all_passbands(df, meta, xlim=params.curve_range, ax=ax, title_info=format_title(meta))
+
         ax.axvline(pred[i], color="blue", linestyle="--", label="Predicted Max")
+        uncert_band = pred[i] / 2
         ax.axvline(real[i], color="black", linestyle="--")
+        ax.axvspan(pred[i]-uncert_band, pred[i]+uncert_band, color="blue", alpha=0.2)
+        plt.legend(fontsize=8)
         if save:
             fig.savefig(save_dir + tess_name, bbox_inches="tight")
             plt.close(fig)
+
 
 
 
