@@ -9,7 +9,6 @@ import astropy.units as u
 import shutil
 from scipy.optimize import minimize_scalar
 
-
 # transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47.txt",
 #                          names=["sector", "ra", "dec", "discovery_mag", "discovery_date", "type", "classification", "IAU_name",
 #                                 "discovery_survey","cam", "ccd", "col", "row"], delim_whitespace=True)
@@ -143,7 +142,7 @@ def preprocess_ztf(filename, parameters):
     return ztf_df, curve_meta
 
 
-def preprocess_tess(filename, parameters, curve_meta=None):
+def preprocess_tess(filename, parameters, curve_meta=None, cts_per_sec=True):
     original = pd.read_csv("./TESS_data/light_curves_fausnaugh/" + filename, delim_whitespace=True)
 
     if curve_meta is None:
@@ -151,11 +150,10 @@ def preprocess_tess(filename, parameters, curve_meta=None):
         curve_meta = get_curve_meta(tess_curve_name)
         if curve_meta is None:
             return None, None
-
+    #
     # exposure_time = 1425.6 if curve_meta["sector"] in range(1, 27) else 475.2
-    # original["cts"] /= exposure_time
+    # original[f"cts"] /= exposure_time
     # original["e_cts"] /= exposure_time
-    # original["bkg_model"] /= exposure_time
     processed = preprocess(original, curve_meta, convert_to_mag=parameters['convert_to_mag'], to_bin=parameters['to_bin'],
                            bin_interval=parameters['bin_interval'], time_scale=parameters['time_scale'],
                            norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'],
@@ -171,26 +169,32 @@ def preprocess_ztf_tess(ztf_filename, params):
     if df_meta is None:
         return None, None
     tess_filename = f'lc_{df_meta["IAU_name"]}_cleaned'
-    tess_df, _ = preprocess_tess(tess_filename, params)
+    tess_df, _ = preprocess_tess(tess_filename, params, cts_per_sec=not params["convert_to_mag"])
+    light_unit = "flux" if not params["convert_to_mag"] else "mag"
+
+    exposure_time = 1425.6 if df_meta["sector"] in range(1, 27) else 475.2
+    tess_df[f"tess_{light_unit}"] /= exposure_time
+    tess_df["tess_uncert"] /= exposure_time
     curve = ztf_df.join(tess_df, how="outer")
     if curve.index.dtype != 'float64':
         curve.index = curve.index.astype('float64', copy=False)
-
-    light_unit = "flux" if not params["convert_to_mag"] else "mag"
-
     if not params['to_bin']:
         def get_correction_df(band_name, df):
             rescale_timesteps = []
             light = f"tess_{light_unit}"
-            filter_df = pd.DataFrame({light: df[light], "relative_time": df.index})
-            filter_df.index = pd.TimedeltaIndex(filter_df["relative_time"], unit="D")
+            filter_df = df.copy()
+            filter_df.index = pd.TimedeltaIndex(df.index, unit="D")
 
             def get_rescale_timesteps(window):
-                if not window[light].empty and not window[band_name].empty:
+                tess = window[light]
+                ztf = window[band_name]
+                if not tess.empty and not ztf.empty and not tess.isnull().all() and not ztf.isnull().all():
                     rescale_timesteps.extend(window.index.tolist())
+                return 0
 
             filter_df.resample(params["bin_interval"], origin="start").apply(get_rescale_timesteps)
-            correction_df = df[df["relative_time"].isin(rescale_timesteps)]
+            correction_df = df[filter_df.index.isin(rescale_timesteps)]
+            correction_df = correction_df[~correction_df[light].isnull() & ~correction_df[band_name].isnull()].loc[-5.0:, :]
             return correction_df
     else:
         def get_correction_df(band_name, df):
@@ -214,9 +218,10 @@ def preprocess_ztf_tess(ztf_filename, params):
         return False
 
     def diff_correction(band_name, df):
-        diff_df =get_correction_df(band_name, df)
-        if not diff_df.empty:
-            df[f"tess_{light_unit}"] += (diff_df[band_name] - diff_df[f"tess_{light_unit}"]).mean()
+        diff_df = get_correction_df(band_name, df)
+        if not diff_df.empty and len(diff_df.index) >= 2:
+            correction = (diff_df[band_name] - diff_df[f"tess_{light_unit}"]).mean()
+            df[f"tess_{light_unit}"] += correction
             return True
         return False
 
@@ -224,13 +229,14 @@ def preprocess_ztf_tess(ztf_filename, params):
     if not rescaled:
         rescaled = optimize_offset(f"r_{light_unit}", curve)
         if not rescaled:
-            scale = 0.10
+            scale = 180
             curve[f"tess_{light_unit}"] *= scale
             curve[f"tess_uncert"] *= scale
 
     corrected = diff_correction(f"r_{light_unit}", curve)
     if not corrected:
-        diff_correction(f"g_{light_unit}", curve)
+        corrected = diff_correction(f"g_{light_unit}", curve)
+
     return curve, df_meta
 
 
@@ -289,12 +295,6 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
         if not curve['bkg_model'].isnull().all():
             curve[light] = curve[light] - curve['bkg_model']
 
-    # offset so whole curve is positive
-    if light == "cts":
-        pretrigger = curve[curve["relative_time"] < 0.0][light]
-        if not pretrigger.empty and not pretrigger.isnull().all():
-            curve[light] -= pretrigger.median()
-
     # sigma clipping by e_cts
     curve = sigma_clip(curve, uncert)
 
@@ -327,6 +327,11 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
         curve[light] = convert_cts_to_mag(curve[light], sector)
         # sigma clipping by e_cts
         curve = sigma_clip(curve, uncert)
+    # offset so whole curve is positive
+    elif light == "cts":
+        pretrigger = curve[curve["relative_time"] < -5.0][light]
+        if not pretrigger.empty and not pretrigger.isnull().all():
+            curve[light] -= pretrigger.median()
 
     if remove_extinction:
         ra = curve_meta["ra"]
@@ -442,20 +447,20 @@ if __name__ == "__main__":
     data, meta = preprocess_ztf_tess("2019mdw_ZTF19abinjcy_exitcode57.csv", config)
     print(data)
     # save all curves as CSVs for training
-    # import warnings
-    # import glob
-    #
-    # with warnings.catch_warnings():
-    #     warnings.simplefilter("ignore")
-    #     labels = pd.read_csv("./TESS_data/curve_labels.csv")
-    #     # config this to adjust which dataset
-    #     good = (labels["tess_good"] == True)
-    #     maybe = (labels["tess_maybe"] == True)
-    #     great = (labels["tess_great"] == True)
-    #     desired_labels = labels[good | great]["curve_name"]
-    #     # ztf_tess
-    #     to_process = [glob.glob(f"./TESS_data/ztf_data/{label}_*.csv")[0].split("\\")[1] for label in desired_labels]
-    #     save_processed_curves("processed_curves_unbinned", config, to_process_lst=to_process,
-    #                           meta_targets=["mwebv"], mask_val=0.0,
-    #                           fill_missing=False, curve_range=(-30, 70), ztf_tess=True)
+    import warnings
+    import glob
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        labels = pd.read_csv("./TESS_data/curve_labels.csv")
+        # config this to adjust which dataset
+        good = (labels["tess_good"] == True)
+        maybe = (labels["tess_maybe"] == True)
+        great = (labels["tess_great"] == True)
+        desired_labels = labels[good | great]["curve_name"]
+        # ztf_tess
+        to_process = [glob.glob(f"./TESS_data/ztf_data/{label}_*.csv")[0].split("\\")[1] for label in desired_labels]
+        save_processed_curves("processed_curves_unbinned", config, to_process_lst=to_process,
+                              meta_targets=["mwebv"], mask_val=0.0,
+                              fill_missing=False, curve_range=(-30, 70), ztf_tess=True)
 
