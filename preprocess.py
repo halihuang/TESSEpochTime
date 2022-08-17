@@ -8,6 +8,8 @@ import astropy.coordinates as coord
 import astropy.units as u
 import shutil
 from scipy.optimize import minimize_scalar
+import glob
+
 
 # transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47.txt",
 #                          names=["sector", "ra", "dec", "discovery_mag", "discovery_date", "type", "classification", "IAU_name",
@@ -100,6 +102,10 @@ def get_curve_meta(curve_name):
         return curve_meta
 
 
+def find_by_tess_name(tess_name):
+    return glob.glob(f"./TESS_data/ztf_data/{tess_name}_*.csv")[0].split("\\")[1]
+
+
 def preprocess_ztf(filename, parameters):
     # lightcurve data
     curve = pd.read_csv("./TESS_data/ztf_data/" + filename)
@@ -150,10 +156,7 @@ def preprocess_tess(filename, parameters, curve_meta=None, cts_per_sec=True):
         curve_meta = get_curve_meta(tess_curve_name)
         if curve_meta is None:
             return None, None
-    #
-    # exposure_time = 1425.6 if curve_meta["sector"] in range(1, 27) else 475.2
-    # original[f"cts"] /= exposure_time
-    # original["e_cts"] /= exposure_time
+
     processed = preprocess(original, curve_meta, convert_to_mag=parameters['convert_to_mag'], to_bin=parameters['to_bin'],
                            bin_interval=parameters['bin_interval'], time_scale=parameters['time_scale'],
                            norm=parameters['norm'], sub_bg_model=parameters['sub_bg_model'],
@@ -225,18 +228,25 @@ def preprocess_ztf_tess(ztf_filename, params):
             return True
         return False
 
-    rescaled = optimize_offset(f"r_{light_unit}", curve)
-    if not rescaled:
+    if params["optimize_scale"]:
         rescaled = optimize_offset(f"r_{light_unit}", curve)
         if not rescaled:
-            scale = 180
-            curve[f"tess_{light_unit}"] *= scale
-            curve[f"tess_uncert"] *= scale
+            rescaled = optimize_offset(f"r_{light_unit}", curve)
+    else:
+        rescaled = False
+
+    if not rescaled:
+        scale = params["scale_factor"]
+        curve[f"tess_{light_unit}"] *= scale
+        curve[f"tess_uncert"] *= scale
 
     corrected = diff_correction(f"r_{light_unit}", curve)
     if not corrected:
         corrected = diff_correction(f"g_{light_unit}", curve)
 
+    curve[f"tess_{light_unit}"] += params["manual_diff_corr"]
+
+    # print(rescaled, corrected)
     return curve, df_meta
 
 
@@ -253,6 +263,10 @@ def create_params_obj(sub_bg_model=False, remove_extinction=True, median_filter=
         "median_filter": median_filter,
         "window_size": window_size,
         "remove_extinction": remove_extinction,
+        # ztf_tess alignment params
+        "scale_factor": 180,
+        "optimize_scale": True,
+        "manual_diff_corr": 0
     }
 
 
@@ -372,11 +386,11 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
 
 
 def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, enable_final_processing=True, meta_targets=[], fill_missing=True,
-                          mask_val=-1.0, curve_range=None):
+                          mask_val=0.0, curve_range=None, reset=False, directory="./TESS_data/processed_curves/", curve_labels=None):
     mwebv_outliers = []
-    directory = "./TESS_data/processed_curves/"
-    for f in os.listdir(directory):
-        os.remove(os.path.join(directory, f))
+    if reset:
+        for f in os.listdir(directory):
+            os.remove(os.path.join(directory, f))
 
     if not to_process_lst:
         to_process_lst = os.listdir("./TESS_data/ztf_data/") if ztf_tess else \
@@ -390,11 +404,8 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
 
         if curve is not None and not curve.empty:
             passbands = ["tess", "r", "g"] if ztf_tess else ["tess"]
-            if params["convert_to_mag"]:
-                targets = [f"{pb}_mag" for pb in passbands] + [f"{pb}_uncert" for pb in passbands]
-            else:
-                targets = [f"{pb}_flux" for pb in passbands] + [f"{pb}_uncert" for pb in passbands]
-
+            light_unit = "mag" if params["convert_to_mag"] else "flux"
+            targets = [f"{pb}_{light_unit}" for pb in passbands] + [f"{pb}_uncert" for pb in passbands]
             df = curve[targets]
             tess_id = meta['IAU_name']
             print(tess_id)
@@ -407,6 +418,18 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
                 mwebv_outliers.append({"mwebv": meta['mwebv'], "class": meta['classification'], 'gal_lat': meta['gal_lat'], 'IAU_name': tess_id})
             else:
                 if enable_final_processing:
+                    # decide if passband gets allowed based on label
+                    if curve_labels is not None and ztf_tess:
+                        curve_label = curve_labels.set_index("curve_name").loc[tess_id, :]
+                        tess_labels = ["tess_maybe", "tess_good", "tess_great"]
+                        ztf_labels = ["ztf_maybe", "ztf_good", "ztf_great"]
+                        include_tess = curve_label[["tess_maybe", "tess_good", "tess_great"]].any()
+                        include_ztf = curve_label[["ztf_maybe", "ztf_good", "ztf_great"]].any()
+                        if not include_tess:
+                            df[[f"tess_{light_unit}", "tess_uncert"]] = np.NaN
+                        if not include_ztf:
+                            df[[f"r_{light_unit}", f"g_{light_unit}", "g_uncert", "r_uncert"]] = np.NaN
+
                     # add additional meta information
                     for info in meta_targets:
                         valid_timesteps = (df != mask_val).any(axis=1)
@@ -433,34 +456,84 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
 if __name__ == "__main__":
     config = {
         "norm": False,
-        "to_bin": False,
+        "to_bin": True,
         "bin_interval": "0.5D",
         "time_scale": "trigger",
         'convert_to_mag': False,
         'sub_bg_model': False,
         'remove_extinction': True,
         "median_filter": True,
-        "window_size": "2.5D"
+        "window_size": "2.5D",
+        # ztf_tess alignment params
+        "scale_factor": 180,
+        "optimize_scale": True,
+        "manual_diff_corr": 0
     }
-    data, meta = preprocess_ztf("2018hyy_ZTF18acckoil_exitcode62.csv", config)
-
-    data, meta = preprocess_ztf_tess("2019mdw_ZTF19abinjcy_exitcode57.csv", config)
-    print(data)
+    # data, meta = preprocess_ztf("2018hyy_ZTF18acckoil_exitcode62.csv", config)
+    #
+    # data, meta = preprocess_ztf_tess("2019mdw_ZTF19abinjcy_exitcode57.csv", config)
+    # print(data)
     # save all curves as CSVs for training
-    import warnings
-    import glob
+    labels = pd.read_csv("./TESS_data/curve_labels.csv")
+    tess_good = (labels["tess_good"] == True)
+    tess_maybe = (labels["tess_maybe"] == True)
+    tess_great = (labels["tess_great"] == True)
+    ztf_good = (labels["ztf_good"] == True)
+    ztf_maybe = (labels["ztf_maybe"] == True)
+    ztf_great = (labels["ztf_great"] == True)
+    bad_scale = (labels["bad_scale"] == True)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        labels = pd.read_csv("./TESS_data/curve_labels.csv")
-        # config this to adjust which dataset
-        good = (labels["tess_good"] == True)
-        maybe = (labels["tess_maybe"] == True)
-        great = (labels["tess_great"] == True)
-        desired_labels = labels[good | great]["curve_name"]
-        # ztf_tess
-        to_process = [glob.glob(f"./TESS_data/ztf_data/{label}_*.csv")[0].split("\\")[1] for label in desired_labels]
-        save_processed_curves("processed_curves_unbinned", config, to_process_lst=to_process,
-                              meta_targets=["mwebv"], mask_val=0.0,
-                              fill_missing=False, curve_range=(-30, 70), ztf_tess=True)
+    # config this to adjust which dataset
+    desired_labels = labels[~bad_scale & (ztf_maybe & tess_maybe) | tess_good | tess_great | ztf_good | ztf_great]["curve_name"]
+    zip_name = "processed_curves_unbinned"
+    curve_lim = (-30, 70)
+    fill = False
+    maskval = 0.0
+    meta_targets = ["mwebv"]
 
+    # ztf_tess
+    to_process = [find_by_tess_name(label) for label in desired_labels]
+    save_processed_curves(zip_name, config, to_process_lst=to_process, reset=True,
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 12 curves that do worse with optimized scaling
+    config["optimize_scale"] = False
+    to_process = ["2018kfv_ZTF18acwutbr_exitcode57.csv", "2018koy_ZTF18adaifep_exitcode0.csv",
+                  "2019bwu_ZTF19aamsjlt_exitcode61.csv", "2020dya_ZTF20aasijew_exitcode56.csv",
+                  "2020ebr_ZTF20aarjgox_exitcode56.csv", "2021abbl_ZTF21achcwnd_exitcode56.csv",
+                  "2021dsb_ZTF21aamucom_exitcode56.csv", "2021hup_ZTF21aarhnwn_exitcode0.csv",
+                  "2021rgm_ZTF21abilrxd_exitcode61.csv","2021ucq_ZTF21abouexm_exitcode56.csv",
+                  "2021xzf_ZTF21abyfxqr_exitcode56.csv", "2022dma_ZTF22aabwfss_exitcode0.csv"]
+    save_processed_curves(zip_name, config, to_process_lst=to_process,
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2018ksr
+    config["scale_factor"] = 80
+    save_processed_curves(zip_name, config, to_process_lst=["2018ksr_ZTF18adaivyd_exitcode56.csv"],
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2020fcw, 2022eat
+    config["scale_factor"] = 180
+    config["manual_diff_corr"] = 5000
+    to_process = ["2020fcw_ZTF20aattotq_exitcode0.csv", "2022eat_ZTF22aacrugz_exitcode57.csv"]
+    save_processed_curves(zip_name, config, to_process_lst=to_process,
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2022dyu, 2022eaz, 2022een
+    config["manual_diff_corr"] = 5000
+    to_process = ["2022een_ZTF22aacrwal_exitcode0.csv", "2022dyu_ZTF22aacdkzo_exitcode56.csv",
+                  "2022eaz_ZTF18aahvpcy_exitcode0.csv"]
+    save_processed_curves(zip_name, config, to_process_lst=to_process,
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2019bip
+    config["scale_factor"] = 800
+    config["manual_diff_corr"] = 6500
+    save_processed_curves(zip_name, config, to_process_lst=["2019bip_ZTF19aallimd_exitcode56.csv"],
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
