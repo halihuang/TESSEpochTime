@@ -1,4 +1,4 @@
-from preprocess import preprocess_ztf_tess, preprocess_tess, get_curve_meta
+from preprocess import preprocess_ztf_tess, preprocess_tess, get_max_light
 import matplotlib.pyplot as plt
 
 
@@ -9,6 +9,12 @@ def find_max_light(curve, light_col, is_mag=False):
     max_data = curve.loc[id_max, :].copy()
     max_data['relative_time'] = id_max
     return max_data
+
+
+def plot_modeled_max_light(meta, ax):
+    t_max, uncert = get_max_light(meta["IAU_name"])
+    ax.axvline(t_max, color="blue", linestyle="--", label=f"Modeled Max: {t_max}")
+    ax.axvspan(t_max - uncert, t_max + uncert, color="blue", alpha=0.2)
 
 
 def format_title(curve_meta, title_info=""):
@@ -41,9 +47,9 @@ def display_curve(light_curve, curve_meta, light, uncert,  index="index", color=
                                 xlabel=xlabel, title=plot_title,
                                 label=label, ax=ax)
     if max_line:
-        t_max = find_max_light(curve, light, is_mag=is_mag)
-        if t_max is not None:
-            ax.axvline(t_max['relative_time'], color=max_color, linestyle="--", label=f"{label} Max: {t_max['relative_time']}")
+        data_max = find_max_light(curve, light, is_mag)
+        if data_max is not None:
+            ax.axvline(data_max['relative_time'], color=max_color, linestyle="--", label=f"{label} Data Max: {data_max['relative_time']}")
     ax.legend(fontsize=7, loc="upper right")
     return ax
 
@@ -60,6 +66,7 @@ def display_all_passbands(df, meta, xlim, title_info="", ax=None, is_mag=False):
         ax.invert_yaxis()
     ax.set_xlim(xlim)
     ax.set_title(title_info)
+    plot_modeled_max_light(meta, ax)
     return ax
 
 
@@ -90,7 +97,7 @@ def tess_plot(tess_curve_name, parameters, unbinned=True, save=False, save_dir="
         if unbinned:
             params['to_bin'] = False
             df1, meta = preprocess_tess(tess_file_name, params)
-            display_curve(df1, meta, light_col, "tess_uncert", ax=ax, is_mag=False, alpha=0.2, color="blue", max_color="blue", label="unbinned")
+            display_curve(df1, meta, light_col, "tess_uncert", ax=ax, is_mag=False, alpha=0.2, color="blue", max_color="black", label="unbinned")
 
         display_curve(df, meta, light_col, "tess_uncert", ax=ax, is_mag=False, alpha=0.8)
 
@@ -116,9 +123,12 @@ def plot_pb_seperated(filename, params, xlim=[-30,70], save=False, save_dir="./T
         display_curve(df, meta, f"g_{light_unit}", "g_uncert", color="green", label="ZTF Green Passband",
                            max_line=False, is_mag=params["convert_to_mag"], ax=ax[1], plot_title="")
         ax[1].set_xlim(xlim)
+        plot_modeled_max_light(meta, ax[1])
+
         tess_plot(tess_name, params, xlim=xlim, ax=ax[2])
         ax[2].set_title("")
-        ax[2].set_ylabel("counts per sec")
+        ax[2].set_ylabel("counts")
+        plot_modeled_max_light(meta, ax[2])
 
         if save:
             fig.savefig(save_dir + save_name, bbox_inches="tight")

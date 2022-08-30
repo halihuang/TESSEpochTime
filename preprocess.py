@@ -11,12 +11,6 @@ from scipy.optimize import minimize_scalar
 import glob
 
 
-# transients = pd.read_csv("./TESS_data/AT_count_transients_s1-47.txt",
-#                          names=["sector", "ra", "dec", "discovery_mag", "discovery_date", "type", "classification", "IAU_name",
-#                                 "discovery_survey","cam", "ccd", "col", "row"], delim_whitespace=True)
-# transients.index = transients["IAU_name"]
-
-
 def set_earliest_time(row):
     discovery_times = row["discovery_date"].split("/")
     row["ra"] = row["ra"].split("/")[1]
@@ -33,6 +27,7 @@ def set_earliest_time(row):
 transients = pd.read_csv("./TESS_data/tns_info2.csv")
 transients.index = transients["IAU_name"]
 transients = transients.apply(set_earliest_time, axis=1)
+max_lights = pd.read_csv("./TESS_data/time_of_peak.csv", index_col="object_id")
 
 
 def bin_curves(df, interval, time_col="relative_time", uncert="e_cts"):
@@ -127,12 +122,13 @@ def preprocess_ztf(filename, parameters):
         light_str = f'{pb}_flux' if not parameters['convert_to_mag'] else f'{pb}_mag'
         uncert_str = f'{pb}_uncert'
         if not pb_df.empty:
-            to_process = pd.DataFrame({"TJD": pb_df['TJD'], light_str: pb_df['flux'], uncert_str: pb_df["flux_unc"]})
-            processed_pb = preprocess(to_process, curve_meta, light=light_str, uncert=uncert_str,
+            pb_wavelength = 6215 if pb == "r" else 4767
+            to_process_df = pd.DataFrame({"TJD": pb_df['TJD'], light_str: pb_df['flux'], uncert_str: pb_df["flux_unc"]})
+            processed_pb = preprocess(to_process_df, curve_meta, light=light_str, uncert=uncert_str,
                                       to_bin=parameters['to_bin'], bin_interval=parameters['bin_interval'],
                                       time_scale=parameters['time_scale'], norm=parameters['norm'],
                                       median_filter=False, remove_extinction=parameters['remove_extinction'],
-                                      convert_to_mag=parameters['convert_to_mag'])
+                                      convert_to_mag=parameters['convert_to_mag'], pb_wavelength=pb_wavelength)
             if not parameters['to_bin']:
                 ztf_data[light_str] = remove_duplicate_indices(processed_pb[light_str])
                 ztf_data[uncert_str] = remove_duplicate_indices(processed_pb[uncert_str])
@@ -148,7 +144,7 @@ def preprocess_ztf(filename, parameters):
     return ztf_df, curve_meta
 
 
-def preprocess_tess(filename, parameters, curve_meta=None, cts_per_sec=True):
+def preprocess_tess(filename, parameters, curve_meta=None):
     original = pd.read_csv("./TESS_data/light_curves_fausnaugh/" + filename, delim_whitespace=True)
 
     if curve_meta is None:
@@ -172,7 +168,7 @@ def preprocess_ztf_tess(ztf_filename, params):
     if df_meta is None:
         return None, None
     tess_filename = f'lc_{df_meta["IAU_name"]}_cleaned'
-    tess_df, _ = preprocess_tess(tess_filename, params, cts_per_sec=not params["convert_to_mag"])
+    tess_df, _ = preprocess_tess(tess_filename, params)
     light_unit = "flux" if not params["convert_to_mag"] else "mag"
 
     exposure_time = 1425.6 if df_meta["sector"] in range(1, 27) else 475.2
@@ -245,7 +241,6 @@ def preprocess_ztf_tess(ztf_filename, params):
         corrected = diff_correction(f"g_{light_unit}", curve)
 
     curve[f"tess_{light_unit}"] += params["manual_diff_corr"]
-
     # print(rescaled, corrected)
     return curve, df_meta
 
@@ -272,9 +267,10 @@ def create_params_obj(sub_bg_model=False, remove_extinction=True, median_filter=
 
 def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=False, remove_extinction=True,
                to_bin=True, norm=True, bin_interval="0.5D", time_scale="trigger", convert_to_mag=False,
-               median_filter=True, window_size="1.5D", ):
+               median_filter=True, window_size="1.5D", pb_wavelength=7865):
     """
     processes data of single lightcurve
+
 
     :param curve: panda dataframe containing light curve data
     :param curve_meta: meta information obtained from AT_transients
@@ -290,6 +286,7 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
     observation or trigger, BTJD, or TJD time"
     :param median_filter: if median window-filtering should be applied
     :param window_size: size of window for median window filtering
+    :param pb_wavelength: central passband wavelength in Angstroms
     :return: processed light curve in PandaDataframe
     """
 
@@ -351,7 +348,7 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
         ra = curve_meta["ra"]
         dec = curve_meta["dec"]
         flux_in = curve[light]
-        bandpass_wavelengths = np.array([7865,])
+        bandpass_wavelengths = np.array([pb_wavelength,])
 
         # Get Milky Way E(B-V) Extinction
         coo = coord.SkyCoord(ra, dec, frame='icrs', unit=(u.hourangle, u.deg))
@@ -383,6 +380,12 @@ def preprocess(curve, curve_meta, light="cts", uncert="e_cts", sub_bg_model=Fals
         curve_meta['interval'] = bin_interval
 
     return curve
+
+
+def get_max_light(tess_name):
+    max_light = max_lights.loc[tess_name, "median_time_of_max"]
+    uncert = max_lights.loc[tess_name, "uncertainty"]
+    return max_light, uncert
 
 
 def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, enable_final_processing=True, meta_targets=[], fill_missing=True,
@@ -445,6 +448,10 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
                             if t not in df.index:
                                 df.loc[t] = np.full(shape=len(df.columns), fill_value=mask_val)
                                 df = df.sort_index()
+
+                    max_light, uncert = get_max_light(tess_id)
+                    df["max_light"] = max_light
+                    df["max_uncert"] = uncert
                 filename = f"lc_{tess_id}_{meta['ztf']}_processed.csv" if ztf_tess else f"lc_{tess_id}_processed.csv"
                 df.to_csv(directory + filename)
 
@@ -473,6 +480,7 @@ if __name__ == "__main__":
     #
     # data, meta = preprocess_ztf_tess("2019mdw_ZTF19abinjcy_exitcode57.csv", config)
     # print(data)
+
     # save all curves as CSVs for training
     labels = pd.read_csv("./TESS_data/curve_labels.csv")
     tess_good = (labels["tess_good"] == True)
@@ -484,8 +492,8 @@ if __name__ == "__main__":
     bad_scale = (labels["bad_scale"] == True)
 
     # config this to adjust which dataset
-    desired_labels = labels[~bad_scale & (ztf_maybe & tess_maybe) | tess_good | tess_great | ztf_good | ztf_great]["curve_name"]
-    zip_name = "processed_curves_unbinned"
+    desired_labels = labels[~bad_scale & (ztf_maybe & (tess_maybe | tess_good | tess_great)) | ztf_good | ztf_great]["curve_name"]
+    zip_name = "processed_curves_good_great"
     curve_lim = (-30, 70)
     fill = False
     maskval = 0.0
@@ -523,9 +531,15 @@ if __name__ == "__main__":
                           meta_targets=meta_targets, mask_val=maskval,
                           fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
 
-    # 2022dyu, 2022eaz, 2022een
-    config["manual_diff_corr"] = 5000
-    to_process = ["2022een_ZTF22aacrwal_exitcode0.csv", "2022dyu_ZTF22aacdkzo_exitcode56.csv",
+    # 2018hxq
+    config["manual_diff_corr"] = 600
+    save_processed_curves(zip_name, config, to_process_lst=["2018hxq_ZTF18abyiusv_exitcode62.csv"],
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2019axj, 2022dyu, 2022eaz, 2022een
+    config["manual_diff_corr"] = 1200
+    to_process = ["2019axj_ZTF19aajwjwq_exitcode61.csv", "2022een_ZTF22aacrwal_exitcode0.csv", "2022dyu_ZTF22aacdkzo_exitcode56.csv",
                   "2022eaz_ZTF18aahvpcy_exitcode0.csv"]
     save_processed_curves(zip_name, config, to_process_lst=to_process,
                           meta_targets=meta_targets, mask_val=maskval,
@@ -537,3 +551,11 @@ if __name__ == "__main__":
     save_processed_curves(zip_name, config, to_process_lst=["2019bip_ZTF19aallimd_exitcode56.csv"],
                           meta_targets=meta_targets, mask_val=maskval,
                           fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+
+    # 2018lot
+    config["scale_factor"] = 50
+    config["manual_diff_corr"] = -10000
+    save_processed_curves(zip_name, config, to_process_lst=["2018lot_ZTF17aaabgiw_exitcode0.csv"],
+                          meta_targets=meta_targets, mask_val=maskval,
+                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+    print(f"Saved to:{zip_name}")
