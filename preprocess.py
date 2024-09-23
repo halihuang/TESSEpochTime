@@ -177,28 +177,13 @@ def preprocess_ztf_tess(ztf_filename, params):
     curve = ztf_df.join(tess_df, how="outer")
     if curve.index.dtype != 'float64':
         curve.index = curve.index.astype('float64', copy=False)
-    if not params['to_bin']:
-        def get_correction_df(band_name, df):
-            rescale_timesteps = []
-            light = f"tess_{light_unit}"
-            filter_df = df.copy()
-            filter_df.index = pd.TimedeltaIndex(df.index, unit="D")
 
-            def get_rescale_timesteps(window):
-                tess = window[light]
-                ztf = window[band_name]
-                if not tess.empty and not ztf.empty and not tess.isnull().all() and not ztf.isnull().all():
-                    rescale_timesteps.extend(window.index.tolist())
-                return 0
-
-            filter_df.resample(params["bin_interval"], origin="start").apply(get_rescale_timesteps)
-            correction_df = df[filter_df.index.isin(rescale_timesteps)]
-            correction_df = correction_df[~correction_df[light].isnull() & ~correction_df[band_name].isnull()].loc[-5.0:, :]
-            return correction_df
-    else:
-        def get_correction_df(band_name, df):
-            diff_df = df[~df[f"tess_{light_unit}"].isnull() & ~df[band_name].isnull()].loc[-5.0:, :]
-            return diff_df
+    def get_correction_df(band_name, df):
+        if not params['to_bin']:
+            df["relative_time"] = df.index
+            df = bin_curves(df, params["bin_interval"], uncert="tess_uncert")
+        diff_df = df[~df[f"tess_{light_unit}"].isnull() & ~df[band_name].isnull()].loc[-5.0:, :]
+        return diff_df
 
     def optimize_offset(band_name, df):
         rescale_df = get_correction_df(band_name, df)
@@ -224,12 +209,11 @@ def preprocess_ztf_tess(ztf_filename, params):
             return True
         return False
 
+    rescaled = False
     if params["optimize_scale"]:
         rescaled = optimize_offset(f"r_{light_unit}", curve)
         if not rescaled:
             rescaled = optimize_offset(f"r_{light_unit}", curve)
-    else:
-        rescaled = False
 
     if not rescaled:
         scale = params["scale_factor"]
@@ -388,7 +372,7 @@ def get_max_light(tess_name):
     return max_light, uncert
 
 
-def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, enable_final_processing=True, meta_targets=[], fill_missing=True,
+def save_processed_curves(params, to_process_lst=[], ztf_tess=True, enable_final_processing=True, meta_targets=[], fill_missing=True,
                           mask_val=0.0, curve_range=None, reset=False, directory="./TESS_data/processed_curves/", curve_labels=None):
     mwebv_outliers = []
     if reset:
@@ -424,8 +408,6 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
                     # decide if passband gets allowed based on label
                     if curve_labels is not None and ztf_tess:
                         curve_label = curve_labels.set_index("curve_name").loc[tess_id, :]
-                        tess_labels = ["tess_maybe", "tess_good", "tess_great"]
-                        ztf_labels = ["ztf_maybe", "ztf_good", "ztf_great"]
                         include_tess = curve_label[["tess_maybe", "tess_good", "tess_great"]].any()
                         include_ztf = curve_label[["ztf_maybe", "ztf_good", "ztf_great"]].any()
                         if not include_tess:
@@ -457,13 +439,11 @@ def save_processed_curves(zip_name, params, to_process_lst=[], ztf_tess=True, en
 
     mwebv_df = pd.DataFrame(mwebv_outliers)
     mwebv_df.to_csv("./TESS_data/mwebv_outliers.csv", index=False)
-    shutil.make_archive(f'./TESS_data/processed_zips/{zip_name}', 'zip', directory)
-
 
 if __name__ == "__main__":
     config = {
         "norm": False,
-        "to_bin": True,
+        "to_bin": False,
         "bin_interval": "0.5D",
         "time_scale": "trigger",
         'convert_to_mag': False,
@@ -476,13 +456,16 @@ if __name__ == "__main__":
         "optimize_scale": True,
         "manual_diff_corr": 0
     }
-    # data, meta = preprocess_ztf("2018hyy_ZTF18acckoil_exitcode62.csv", config)
-    #
-    # data, meta = preprocess_ztf_tess("2019mdw_ZTF19abinjcy_exitcode57.csv", config)
-    # print(data)
+    zip_name = "processed_curves_ztf_tess_unbinned_good_great"
+    curve_lim = (-30, 70)
+    fill = False
+    maskval = 0.0
+    meta_targets = ["mwebv"]
+    ztf_tess = True
+    label_formatting = True
 
     # save all curves as CSVs for training
-    labels = pd.read_csv("./TESS_data/curve_labels.csv")
+    labels = pd.read_csv("./TESS_data/curve_labels.csv")  # set to None to ignore labels
     tess_good = (labels["tess_good"] == True)
     tess_maybe = (labels["tess_maybe"] == True)
     tess_great = (labels["tess_great"] == True)
@@ -491,71 +474,70 @@ if __name__ == "__main__":
     ztf_great = (labels["ztf_great"] == True)
     bad_scale = (labels["bad_scale"] == True)
 
-    # config this to adjust which dataset
-    desired_labels = labels[~bad_scale & (ztf_maybe & (tess_maybe | tess_good | tess_great)) | ztf_good | ztf_great]["curve_name"]
-    zip_name = "processed_curves_good_great"
-    curve_lim = (-30, 70)
-    fill = False
-    maskval = 0.0
-    meta_targets = ["mwebv"]
+    # config this to adjust which part of dataset
+    desired_labels = labels[~bad_scale & ((ztf_maybe & (tess_maybe | tess_good | tess_great)) | ztf_good | ztf_great)]["curve_name"]
+    to_process = [find_by_tess_name(label) for label in desired_labels] # set to None to process all
 
-    # ztf_tess
-    to_process = [find_by_tess_name(label) for label in desired_labels]
-    save_processed_curves(zip_name, config, to_process_lst=to_process, reset=True,
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+    # # # process all
+    # to_process = None
+    # labels = None
+    save_processed_curves(config, to_process_lst=to_process, reset=True,
+                          meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                          ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
+    if ztf_tess:
+        # 12 curves that do worse with optimized scaling
+        config["optimize_scale"] = False
+        to_process = ["2018kfv_ZTF18acwutbr_exitcode57.csv", "2018koy_ZTF18adaifep_exitcode0.csv",
+                      "2019bwu_ZTF19aamsjlt_exitcode61.csv", "2020dya_ZTF20aasijew_exitcode56.csv",
+                      "2020ebr_ZTF20aarjgox_exitcode56.csv", "2021abbl_ZTF21achcwnd_exitcode56.csv",
+                      "2021dsb_ZTF21aamucom_exitcode56.csv", "2021hup_ZTF21aarhnwn_exitcode0.csv",
+                      "2021rgm_ZTF21abilrxd_exitcode61.csv","2021ucq_ZTF21abouexm_exitcode56.csv",
+                      "2021xzf_ZTF21abyfxqr_exitcode56.csv", "2022dma_ZTF22aabwfss_exitcode0.csv"]
+        save_processed_curves(config, to_process_lst=to_process,
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 12 curves that do worse with optimized scaling
-    config["optimize_scale"] = False
-    to_process = ["2018kfv_ZTF18acwutbr_exitcode57.csv", "2018koy_ZTF18adaifep_exitcode0.csv",
-                  "2019bwu_ZTF19aamsjlt_exitcode61.csv", "2020dya_ZTF20aasijew_exitcode56.csv",
-                  "2020ebr_ZTF20aarjgox_exitcode56.csv", "2021abbl_ZTF21achcwnd_exitcode56.csv",
-                  "2021dsb_ZTF21aamucom_exitcode56.csv", "2021hup_ZTF21aarhnwn_exitcode0.csv",
-                  "2021rgm_ZTF21abilrxd_exitcode61.csv","2021ucq_ZTF21abouexm_exitcode56.csv",
-                  "2021xzf_ZTF21abyfxqr_exitcode56.csv", "2022dma_ZTF22aabwfss_exitcode0.csv"]
-    save_processed_curves(zip_name, config, to_process_lst=to_process,
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2018ksr
+        config["scale_factor"] = 80
+        save_processed_curves(config, to_process_lst=["2018ksr_ZTF18adaivyd_exitcode56.csv"],
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2018ksr
-    config["scale_factor"] = 80
-    save_processed_curves(zip_name, config, to_process_lst=["2018ksr_ZTF18adaivyd_exitcode56.csv"],
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2020fcw, 2022eat
+        config["scale_factor"] = 180
+        config["manual_diff_corr"] = 5000
+        to_process = ["2020fcw_ZTF20aattotq_exitcode0.csv", "2022eat_ZTF22aacrugz_exitcode57.csv"]
+        save_processed_curves(config, to_process_lst=to_process,
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2020fcw, 2022eat
-    config["scale_factor"] = 180
-    config["manual_diff_corr"] = 5000
-    to_process = ["2020fcw_ZTF20aattotq_exitcode0.csv", "2022eat_ZTF22aacrugz_exitcode57.csv"]
-    save_processed_curves(zip_name, config, to_process_lst=to_process,
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2018hxq
+        config["manual_diff_corr"] = 600
+        save_processed_curves(config, to_process_lst=["2018hxq_ZTF18abyiusv_exitcode62.csv"],
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2018hxq
-    config["manual_diff_corr"] = 600
-    save_processed_curves(zip_name, config, to_process_lst=["2018hxq_ZTF18abyiusv_exitcode62.csv"],
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2019axj, 2022dyu, 2022eaz, 2022een
+        config["manual_diff_corr"] = 1200
+        to_process = ["2019axj_ZTF19aajwjwq_exitcode61.csv", "2022een_ZTF22aacrwal_exitcode0.csv",
+                      "2022dyu_ZTF22aacdkzo_exitcode56.csv","2022eaz_ZTF18aahvpcy_exitcode0.csv"]
+        save_processed_curves(config, to_process_lst=to_process,
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2019axj, 2022dyu, 2022eaz, 2022een
-    config["manual_diff_corr"] = 1200
-    to_process = ["2019axj_ZTF19aajwjwq_exitcode61.csv", "2022een_ZTF22aacrwal_exitcode0.csv", "2022dyu_ZTF22aacdkzo_exitcode56.csv",
-                  "2022eaz_ZTF18aahvpcy_exitcode0.csv"]
-    save_processed_curves(zip_name, config, to_process_lst=to_process,
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2019bip
+        config["scale_factor"] = 800
+        config["manual_diff_corr"] = 6500
+        save_processed_curves(config, to_process_lst=["2019bip_ZTF19aallimd_exitcode56.csv"],
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2019bip
-    config["scale_factor"] = 800
-    config["manual_diff_corr"] = 6500
-    save_processed_curves(zip_name, config, to_process_lst=["2019bip_ZTF19aallimd_exitcode56.csv"],
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+        # 2018lot
+        config["scale_factor"] = 50
+        config["manual_diff_corr"] = -10000
+        save_processed_curves(config, to_process_lst=["2018lot_ZTF17aaabgiw_exitcode0.csv"],
+                              meta_targets=meta_targets, mask_val=maskval, fill_missing=fill, curve_range=curve_lim,
+                              ztf_tess=ztf_tess, curve_labels=labels, enable_final_processing=label_formatting)
 
-    # 2018lot
-    config["scale_factor"] = 50
-    config["manual_diff_corr"] = -10000
-    save_processed_curves(zip_name, config, to_process_lst=["2018lot_ZTF17aaabgiw_exitcode0.csv"],
-                          meta_targets=meta_targets, mask_val=maskval,
-                          fill_missing=fill, curve_range=curve_lim, ztf_tess=True, curve_labels=labels)
+    shutil.make_archive(f'./TESS_data/processed_zips/{zip_name}', 'zip', "./TESS_data/processed_curves/")
     print(f"Saved to:{zip_name}")
